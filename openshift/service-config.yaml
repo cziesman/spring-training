@@ -1,0 +1,14 @@
+apiVersion: apps.openshift.io/v1"
+kind: Service
+metadata:
+  labels:
+    app: spring-training
+    application: spring-training
+  name: spring-training
+spec:
+  ports:
+    - port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    deploymentconfig: spring-training

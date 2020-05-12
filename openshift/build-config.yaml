@@ -1,0 +1,21 @@
+kind: "BuildConfig"
+apiVersion: "build.openshift.io/v1"
+metadata:
+  labels:
+    application: spring-training
+  name: "spring-training"
+  namespace: "spring-training-dev"
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/cziesman/spring-training.git
+      ref: master
+  triggers:
+    - type: ImageChange
+      imageChange: {}
+    - type: "ConfigChange"
+  strategy:
+    type: "JenkinsPipeline"
+    jenkinsPipelineStrategy:
+      jenkinsfilePath: Jenkinsfile
