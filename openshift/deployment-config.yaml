@@ -1,0 +1,77 @@
+apiVersion: apps.openshift.io/v1"
+kind: DeploymentConfig
+metadata:
+  name: spring-training
+  labels:
+    application: spring-training
+spec:
+  replicas: 1
+  selector:
+    deploymentconfig: spring-training
+  strategy:
+    resources: {}
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        application: spring-training
+        deploymentconfig: spring-training
+      name: spring-training
+    spec:
+      containers:
+        - env:
+          image: spring-training
+          imagePullPolicy: Always
+          livenessProbe:
+            failureThreshold: 5
+            httpGet:
+              path: /health
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 45
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          name: spring-training
+          ports:
+            - containerPort: 8778
+              name: jolokia
+              protocol: TCP
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+            - containerPort: 8443
+              name: https
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 10
+            httpGet:
+              path: /health
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 45
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            limits:
+              memory: 1Gi
+              cpu: 1
+            requests:
+              memory: 512Mi
+              cpu: 200m
+          terminationMessagePath: /dev/termination-log
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      securityContext: {}
+      terminationGracePeriodSeconds: 75
+  triggers:
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+          - spring-training
+        from:
+          kind: ImageStreamTag
+          name: spring-training:dev
+      type: ImageChange
+    - type: ConfigChange

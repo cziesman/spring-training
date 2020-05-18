@@ -1,0 +1,86 @@
+kind: "BuildConfig"
+apiVersion: "build.openshift.io/v1"
+metadata:
+  labels:
+    application: spring-training
+  name: "spring-training"
+  namespace: "spring-training-dev"
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/cziesman/spring-training.git
+      ref: master
+  triggers:
+    - type: ImageChange
+      imageChange: {}
+    - type: "ConfigChange"
+  strategy:
+    jenkinsPipelineStrategy:
+      jenkinsfile: |-
+        pipeline {
+          agent {
+            label 'maven'
+          }
+          stages {
+            stage('Build App') {
+              steps {
+                git url: "https://github.com/cziesman/spring-training.git"
+                sh "mvn install"
+                stash name:"jar", includes:"target/spring-training-1.0.0-SNAPSHOT.jar"
+              }
+            }
+            stage('Build Image') {
+              steps {
+                script {
+                  openshift.withCluster() {
+                    openshift.withProject('spring-training-dev') {
+                      unstash name:"jar"
+                      openshift.startBuild("spring-training", "--from-file=target/spring-training-1.0.0-SNAPSHOT.jar", "--follow=true")
+                    }
+                  }
+                }
+              }
+            }
+            stage('Promote to DEV') {
+              steps {
+                script {
+                  openshift.withCluster() {
+                    openshift.withProject('spring-training-dev') {
+                      echo "Using project: ${openshift.project()}"
+                      openshift.tag("spring-training:latest", "spring-training:dev")
+                    }
+                  }
+                }
+              }
+            }
+            stage('Create DEV') {
+              steps {
+                script {
+                  openshift.withCluster() {
+                    openshift.newApp("spring-training-dev/spring-training:latest", "--name=spring-training").narrow('svc').expose()
+                  }
+                }
+              }
+            }
+            stage('Promote STAGE') {
+              steps {
+                script {
+                  openshift.withCluster() {
+                    openshift.tag("spring-training-stage/spring-training:dev", "spring-training-stage/spring-training:stage")
+                  }
+                }
+              }
+            }
+            stage('Create STAGE') {
+              steps {
+                script {
+                  openshift.withCluster() {
+                    openshift.newApp("spring-training-stage/spring-training:stage", "--name=spring-training").narrow('svc').expose()
+                  }
+                }
+              }
+            }
+          }
+        }
+    type: "JenkinsPipeline"

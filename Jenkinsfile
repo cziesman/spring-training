@@ -1,99 +1,241 @@
-#!/usr/bin/groovy
+library identifier: "pipeline-library@v1.5",
+        retriever: modernSCM(
+                [
+                        $class: "GitSCMSource",
+                        remote: "https://github.com/redhat-cop/pipeline-library.git"
+                ]
+        )
 
-////
-// This pipeline requires the following plugins:
-// Kubernetes Plugin 0.10
-////
-
-String ocpApiServer = env.OCP_API_SERVER ? "${env.OCP_API_SERVER}" : "https://openshift.default.svc.cluster.local"
-
-node('master') {
-
-  env.NAMESPACE = readFile('/var/run/secrets/kubernetes.io/serviceaccount/namespace').trim()
-  env.TOKEN = readFile('/var/run/secrets/kubernetes.io/serviceaccount/token').trim()
-  env.OC_CMD = "oc --token=${env.TOKEN} --server=${ocpApiServer} --certificate-authority=/run/secrets/kubernetes.io/serviceaccount/ca.crt --namespace=${env.NAMESPACE}"
-
-  env.APP_NAME = "${env.JOB_NAME}".replaceAll(/-?pipeline-?/, '').replaceAll(/-?${env.NAMESPACE}-?/, '')
-  def projectBase = "${env.NAMESPACE}".replaceAll(/-dev/, '')
-  env.STAGE1 = "${projectBase}-dev"
-  env.STAGE2 = "${projectBase}-stage"
-  env.STAGE3 = "${projectBase}-prod"
-
+openshift.withCluster() {
+    env.NAMESPACE = openshift.project()
+    env.POM_FILE = env.BUILD_CONTEXT_DIR ? "${env.BUILD_CONTEXT_DIR}/pom.xml" : "pom.xml"
+    env.APP_NAME = "${JOB_NAME}".replaceAll(/-build.*/, '')
+    env.BUILD = "${env.NAMESPACE}"
+    env.BUILD_CONFIG = "${APP_NAME}-binary"
+    env.APPLICATION_SOURCE_REPO = "https://github.com/cziesman/spring-training.git"
+    env.APPLICATION_SOURCE_REF = "master"
+    env.DEV_TAG = "dev"
+    env.DEV = "${APP_NAME}-dev"
+    env.STAGE_TAG = "stage"
+    env.STAGE = "${APP_NAME}-stage"
+    env.BUILD_OUTPUT_DIR = "target"
+    env.VERSION = ""
+    //env.SRC_REGISTRY = "${SRC_REGISTRY}"
+    //env.DEST_REGISTRY = "${DEST_REGISTRY}"
+    //env.DEST_CREDENTIALS = "${DEST_CREDENTIALS}"
+    //env.DEST_PROJECT = "${DEST_PROJECT}"
+    //env.SONAR_HOST_URL = "${SONAR_HOST_URL}"
+    //env.SONAR_LOGIN = "${SONAR_LOGIN}"
+    //env.SONAR_PASSWORD = "${SONAR_PASSWORD}"
+    //env.SETTINGS_FILE_ID = "nexus_credentials_file"
+    echo "Starting Pipeline for ${APP_NAME}..."
 }
 
-node('maven') {
-//  def mvnHome = "/usr/share/maven/"
-//  def mvnCmd = "${mvnHome}bin/mvn"
-  def mvnCmd = 'mvn'
-  String pomFileLocation = env.BUILD_CONTEXT_DIR ? "${env.BUILD_CONTEXT_DIR}/pom.xml" : "pom.xml"
+pipeline {
+    agent {
+        label 'maven'
+    }
 
-  stage('SCM Checkout') {
-    checkout scm
-  }
+    stages {
 
-  stage('Build') {
+        stage('Git Checkout') {
+            steps {
+                git url: "${env.APPLICATION_SOURCE_REPO}", branch: "${env.APPLICATION_SOURCE_REF}"
+                script {
+                    def pom = readMavenPom file: 'pom.xml'
+                    env.VERSION = pom.version
+                }
+            }
+        }
 
-    sh "${mvnCmd} clean install -DskipTests=true -f ${pomFileLocation}"
+        stage('Build, Unit Test, Coverage Checks') {
+            steps {
+                echo "Building, running tests, and running coverage checks"
+                script {
+                    try {
+                        sh "mvn clean install -Ddependency-check.skip=true"
 
-  }
+                        // publish unit test report
+                        publishHTML(target: [
+                                reportDir            : "${env.BUILD_OUTPUT_DIR}/site/jacoco",
+                                reportFiles          : 'index.html',
+                                reportName           : 'Jacoco Unit Test Report',
+                                keepAll              : true,
+                                alwaysLinkToLastBuild: false,
+                                allowMissing         : true
+                        ])
+                    } catch (err) {
+                        echo err.getMessage()
+                        throw err
+                    }
+                }
+            }
+        }
 
-  stage('Unit Test') {
+        stage('Create Image Builder') {
+            when {
+                expression {
+                    openshift.withCluster() {
+                        openshift.withProject("${env.DEV}") {
+                            return !openshift.selector("bc", "${env.BUILD_CONFIG}").exists();
+                        }
+                    }
+                }
+            }
+            steps {
+                echo "Creating image builder"
+                script {
+                    openshift.withCluster() {
+                        openshift.withProject("${env.DEV}") {
+                            openshift.newBuild("--name=${env.APP_NAME}", "--image-stream=openjdk-11-rhel7:1.1", "--binary=true")
+                        }
+                    }
+                }
+            }
+        }
 
-     sh "${mvnCmd} test -f ${pomFileLocation}"
+        stage('Create Image') {
+            steps {
+                echo "Creating image"
+                sh "rm -rf oc-build && mkdir -p oc-build/deployments"
+                sh "cp target/${env.APP_NAME}-${env.VERSION}.jar oc-build/deployments/${env.APP_NAME}.jar"
+                script {
+                    try {
+                        openshift.withCluster() {
+                            openshift.withProject("${env.DEV}") {
+                                openshift.loglevel(5)
+                                def buildSelector = openshift.selector("bc", "${env.BUILD_CONFIG}")
+                                        .startBuild("--from-dir=oc-build/deployments", "--namespace=${env.DEV}")
+                                buildSelector.logs('-f')
+                            }
+                        }
+                    } catch (err) {
+                        echo "******************** Image creation failed *******************"
+                        echo err.getMessage()
+                        throw err
+                    }
+                }
+            }
+        }
 
-  }
+        stage('Tag DEV image') {
+            steps {
+                echo "Tagging DEV image"
+                script {
+                    openshift.withCluster() {
+                        openshift.withProject("${env.DEV}") {
+                            openshift.tag("${env.DEV}/${env.APP_NAME}:latest", "${env.DEV}/${env.APP_NAME}:${env.DEV_TAG}")
+                        }
+                    }
+                }
+            }
+        }
 
-  // The following variables need to be defined at the top level and not inside
-  // the scope of a stage - otherwise they would not be accessible from other stages.
-  // Extract version and other properties from the pom.xml
-  //def groupId    = getGroupIdFromPom("./pom.xml")
-  //def artifactId = getArtifactIdFromPom("./pom.xml")
-  //def version    = getVersionFromPom("./pom.xml")
-  //println("Artifact ID:" + artifactId + ", Group ID:" + groupId)
-  //println("New version tag:" + version)
+        stage('Create service and route in DEV') {
+            // this is not how one would normally expose a service and a route,
+            // but it's a simpler approach for the purposes of this training exercise.
+            steps {
+                script {
+                    try {
+                        openshift.withCluster() {
+                            openshift.withProject("${env.DEV}") {
+                                def app = openshift.selector("dc", "${env.APP_NAME}")
+                                if (!openshift.selector("svc", "${env.APP_NAME}").exists()) {
+                                    echo "Creating service"
+                                    app.narrow("svc").expose();
+                                }
+                                if (!openshift.selector("routes", "${env.APP_NAME}").exists()) {
+                                    echo "Creating route"
+                                    openshift.raw("expose svc/${env.APP_NAME}");
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        echo "******************** Service or route expose failed *******************"
+                        echo err.getMessage()
+                        throw err
+                    }
+                }
+            }
+        }
 
-  stage('Build Image') {
+        stage("Verify deploy") {
+            steps {
+                echo "Verifying DEV deployment"
+                script {
+                    openshift.withCluster() {
+                        openshift.withProject("${env.DEV}") {
+                            env.DEV_ROUTE = openshift.selector("routes", "${env.APP_NAME}").narrow('route').object().spec.host
 
-    sh """
-      rm -rf oc-build && mkdir -p oc-build/deployments
-      for t in \$(echo "jar;war;ear" | tr ";" "\\n"); do
-        cp -rfv ./target/*.\$t oc-build/deployments/ 2> /dev/null || echo "No \$t files"
-      done
-      ${env.OC_CMD} start-build ${env.APP_NAME} --from-dir=oc-build --wait=true --follow=true || exit 1
-    """
-  }
+                            def healthResponse = 1
+                            timeout(time: 5, unit: 'MINUTES') {
+                                waitUntil {
+                                    def health = httpRequest(url: "http://${env.DEV_ROUTE}/health", validResponseCodes: "200:600")
+                                    if (health.status == 200 && health.content.contains("{\"status\":\"UP\"}")) {
+                                        healthResponse = 0
+                                    }
+                                    return (healthResponse == 0)
+                                }
+                            }
+                            if (healthResponse != 0) {
+                                error("Verify deploy failed")
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
-  stage("Verify Deployment to ${env.STAGE1}") {
+        stage("Run Smoke Tests") {
+            steps {
+                echo "Running smoke tests"
+                script {
+                    openshift.withCluster() {
+                        openshift.withProject("${env.DEV}") {
 
-    openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}", namespace: "${STAGE1}", verifyReplicaCount: true)
+                            def smokeResponse = 1
+                            timeout(time: 5, unit: 'MINUTES') {
+                                waitUntil {
+                                    def smoke = httpRequest(url: "http://${env.DEV_ROUTE}", validResponseCodes: "200:600")
+                                    if (smoke.status == 200 && smoke.content.contains("\"Hello, World!\"")) {
+                                        smokeResponse = 0
+                                    }
+                                    return (smokeResponse == 0)
+                                }
 
-    input "Promote Application to Stage?"
-  }
+                                if (smokeResponse != 0) {
+                                    error("Running smoke tests failed")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
-  stage("Promote To ${env.STAGE2}") {
-    sh """
-    ${env.OC_CMD} tag ${env.STAGE1}/${env.APP_NAME}:latest ${env.STAGE2}/${env.APP_NAME}:latest
-    """
-  }
+        stage('OWASP Vulnerability Checks') {
+            steps {
+                echo "Running OWASP vulnerability checks"
+                script {
+                    try {
+                        sh "mvn dependency-check:check"
 
-  stage("Verify Deployment to ${env.STAGE2}") {
+                        // publish dependency report
+                        publishHTML(target: [
+                                reportDir            : "${env.BUILD_OUTPUT_DIR}",
+                                reportFiles          : 'dependency-check-report.html',
+                                reportName           : 'OWASP Dependency Vulnerability Report',
+                                keepAll              : true,
+                                alwaysLinkToLastBuild: false,
+                                allowMissing         : true
+                        ])
+                    } catch (err) {
+                        echo err.getMessage()
+                        throw err
+                    }
+                }
+            }
+        }
 
-    openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}", namespace: "${STAGE2}", verifyReplicaCount: true)
-
-    input "Promote Application to Prod?"
-  }
-
-  stage("Promote To ${env.STAGE3}") {
-    sh """
-    ${env.OC_CMD} tag ${env.STAGE2}/${env.APP_NAME}:latest ${env.STAGE3}/${env.APP_NAME}:latest
-    """
-  }
-
-  stage("Verify Deployment to ${env.STAGE3}") {
-
-    openshiftVerifyDeployment(deploymentConfig: "${env.APP_NAME}", namespace: "${STAGE3}", verifyReplicaCount: true)
-
-  }
+    }
 }
-
-println "Application ${env.APP_NAME} is now in Production!"
