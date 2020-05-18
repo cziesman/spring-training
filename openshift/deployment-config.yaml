@@ -20,8 +20,6 @@ spec:
     spec:
       containers:
         - env:
-            - name: CATALOG_ENDPOINT
-              value: "http://catalog:8080"
           image: spring-training
           imagePullPolicy: Always
           livenessProbe:
@@ -74,6 +72,6 @@ spec:
           - spring-training
         from:
           kind: ImageStreamTag
-          name: spring-training:latest
+          name: spring-training:dev
       type: ImageChange
     - type: ConfigChange
