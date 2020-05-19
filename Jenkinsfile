@@ -5,7 +5,7 @@ openshift.withCluster() {
     env.BUILD = "${env.NAMESPACE}"
     env.BUILD_CONFIG = "${APP_NAME}-binary"
     env.APPLICATION_SOURCE_REPO = "https://github.com/cziesman/spring-training.git"
-    env.APPLICATION_SOURCE_REF = "master"
+    env.APPLICATION_SOURCE_BRANCH = "master"
     env.DEV_TAG = "dev"
     env.DEV = "${APP_NAME}-dev"
     env.STAGE_TAG = "stage"
@@ -16,10 +16,6 @@ openshift.withCluster() {
     //env.DEST_REGISTRY = "${DEST_REGISTRY}"
     //env.DEST_CREDENTIALS = "${DEST_CREDENTIALS}"
     //env.DEST_PROJECT = "${DEST_PROJECT}"
-    //env.SONAR_HOST_URL = "${SONAR_HOST_URL}"
-    //env.SONAR_LOGIN = "${SONAR_LOGIN}"
-    //env.SONAR_PASSWORD = "${SONAR_PASSWORD}"
-    //env.SETTINGS_FILE_ID = "nexus_credentials_file"
     echo "Starting Pipeline for ${APP_NAME}..."
 }
 
@@ -33,7 +29,7 @@ pipeline {
         stage('Git Checkout') {
             steps {
                 echo "Checking out from Git"
-                git url: "${env.APPLICATION_SOURCE_REPO}", branch: "${env.APPLICATION_SOURCE_REF}"
+                git url: "${env.APPLICATION_SOURCE_REPO}", branch: "${env.APPLICATION_SOURCE_BRANCH}"
                 script {
                     def pom = readMavenPom file: 'pom.xml'
                     env.VERSION = pom.version
