@@ -19,21 +19,14 @@ This is a simple app using Spring Boot as part of [Red Hat OpenShift Application
 
 ## Added Plugins for Quality and Security
 
-1. SonarQube Scanner Plugin. *NOTE: This plugin is a client and needs to connect to a running sonar server.*
-	- Usage:
-	  - `mvn sonar:sonar` to execute. 
-	  - Plugin is currently not tied to the standard maven lifecyle.
-	- To help execute the scan in Jenkins pipelines, the `sonarqubeStaticAnalysis()` function from the [pipeline-library](https://github.com/redhat-cop/pipeline-library) will execute the goal in your build process.
-	- [SonarQube plugin docs](https://docs.sonarqube.org/display/SCAN/Analyzing+with+SonarQube+Scanner+for+Maven)
-
-2. Jacoco Maven Plugin
+1. Jacoco Maven Plugin
 	- Usage:
 		- `mvn package` to execute in standard maven lifecycle
 		- `mvn jacoco:report` to execute the plugin standalone
 	- Code coverage reports will then be found in `target/site`.
 	- [Jacoco plugin docs](https://www.eclemma.org/jacoco/trunk/doc/maven.html)
 
-3. OWASP Dependency Check
+2. OWASP Dependency Check
 	- Usage:
 	  - `mvn verify` to execute in standard maven lifecycle
 	  - `mvn dependency-check:check` to execute the plugin standalone
