@@ -1,3 +1,4 @@
+// setup the environment variables
 openshift.withCluster() {
     env.NAMESPACE = openshift.project()
     env.POM_FILE = env.BUILD_CONTEXT_DIR ? "${env.BUILD_CONTEXT_DIR}/pom.xml" : "pom.xml"
@@ -12,17 +13,70 @@ openshift.withCluster() {
     env.STAGE = "${APP_NAME}-stage"
     env.BUILD_OUTPUT_DIR = "target"
     env.VERSION = ""
-    //env.SRC_REGISTRY = "${SRC_REGISTRY}"
-    //env.DEST_REGISTRY = "${DEST_REGISTRY}"
-    //env.DEST_CREDENTIALS = "${DEST_CREDENTIALS}"
-    //env.DEST_PROJECT = "${DEST_PROJECT}"
+    env.SRC_REGISTRY = "default-route-openshift-image-registry.apps.ocp-cz.do280.dev.nextcle.com"
+    env.SERVER = "https://api.ocp-cz.do280.dev.nextcle.com:6443"
+    env.SRC_NAMESPACE="ci-cd"
+    env.SRC_TAG="latest"
+    env.DEST_REGISTRY = "quay.io"
+    env.DEST_PROJECT = "cziesman0"
+    env.DOCKER_DIR = "${HOME}/.docker"
+    env.DOCKER_CONFIG = "${env.DOCKER_DIR}/config.json"
+
     echo "Starting Pipeline for ${APP_NAME}..."
 }
 
-pipeline {
-    agent {
-        label 'maven'
+// extract the build parameter for controlling OWASP vulnerability scans
+Boolean SKIP_OWASP = Boolean.valueOf(params.SKIP_OWASP)
+
+// save the config.json file to $HOME/.docker/config.json
+void writeConfig(String configFile, String auths) {
+
+    def file = new File(configFile)
+
+    file.write(auths)
+}
+
+// encode the username:password as Base64
+String base64(String text) {
+
+    return text.bytes.encodeBase64().toString()
+}
+
+// create the auth entry JSON string for a registry
+String creds(String name, String username, String password) {
+
+    String auth = (username + ':' + password).bytes.encodeBase64().toString()
+
+    String retval =
+    """"${name}": {
+                "auth": "${auth}"
+            }"""
+
+    return retval
+}
+
+// create the contents of the config.json file
+String auths(String... creds) {
+
+    String list = ""
+
+    creds.eachWithIndex { item, index ->
+  	     String term = (index < creds.length-1 ) ? ",\n            " : ""
+         list += item + term
     }
+
+    String retval =
+    """    {
+        "auths": {
+            ${list}
+        }
+    }"""
+
+    return retval
+}
+
+pipeline {
+    agent any
 
     stages {
 
@@ -102,7 +156,7 @@ pipeline {
                     openshift.withCluster() {
                         openshift.withProject("${env.DEV}") {
                             try {
-                                openshift.loglevel(5)
+                                openshift.loglevel(2)
                                 def buildSelector = openshift.selector("bc", "${env.BUILD_CONFIG}")
                                         .startBuild("--from-dir=oc-build/deployments", "--namespace=${env.DEV}")
                                 buildSelector.logs('-f')
@@ -155,8 +209,6 @@ pipeline {
                                     echo "Creating route"
                                     openshift.raw("expose svc/${env.APP_NAME}");
                                 }
-
-
                             } catch (err) {
                                 echo "******************** Service or route expose failed *******************"
                                 echo err.getMessage()
@@ -223,9 +275,14 @@ pipeline {
         }
 
         stage('Run OWASP Checks') {
+            when {
+                expression {
+                  return !SKIP_OWASP
+                }
+            }
             steps {
-                echo "Running OWASP vulnerability checks"
                 script {
+                    echo "Running OWASP vulnerability checks"
                     sh "mvn dependency-check:check"
                 }
             }
@@ -244,5 +301,50 @@ pipeline {
             }
         }
 
+        stage("Push Image to Quay") {
+            steps {
+                echo "Pushing Image to Quay"
+                script {
+                    openshift.withCluster() {
+                        openshift.withProject("${env.DEV}") {
+                            try {
+                                // these credentials are defined as global credentials in jenkins.
+                                withCredentials([usernamePassword(credentialsId: 'registry-secret', usernameVariable: 'srcUsername', passwordVariable: 'srcPassword')]) {
+                                    withCredentials([usernamePassword(credentialsId: 'quay-secret', usernameVariable: 'destUsername', passwordVariable: 'destPassword')]) {
+
+                                    // we have to build the config.json file manually because it's not
+                                    // straightforward to use podman or docker to login to a registry
+                                    // from Jenkins in an openshift container, and because for some unknown
+                                    // reason skopeo cannot authenticate if we provide credentials as parameters.
+                                    // this is an ugly, ugly hack but it gets the job done.
+
+                                    // login to openshift so we can get a token for registry access
+                                    sh "oc login -u ${srcUsername} -p ${srcPassword} --server=${env.SERVER}"
+                                    def token = sh(script: "oc whoami -t", returnStdout: true).trim()
+
+                                    // build the contents of the docker config.json file
+                                    def srcCreds = creds(env.SRC_REGISTRY, srcUsername, token)
+                                    def destCreds = creds(env.DEST_REGISTRY, destUsername, destPassword)
+                                    def auths = auths(srcCreds, destCreds)
+
+                                    // save the config.json file
+                                    sh "mkdir -p ${env.DOCKER_DIR}"
+                                    writeConfig(env.DOCKER_CONFIG, auths)
+
+                                    // copy the image from the internal registry to Quay
+                                    sh 'skopeo --debug copy --src-tls-verify=false --dest-tls-verify=false ' + \
+                                       "docker://${env.SRC_REGISTRY}/${env.DEV}/${env.APP_NAME} " + \
+                                       "docker://${env.DEST_REGISTRY}/${env.DEST_PROJECT}/${env.APP_NAME}:${env.VERSION}"
+                                }
+                              }
+                            } catch (err) {
+                                echo err.getMessage()
+                                throw err
+                              }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
